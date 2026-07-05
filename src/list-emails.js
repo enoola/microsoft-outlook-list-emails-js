@@ -546,6 +546,54 @@ async function scrapeEmails(page) {
 }
 
 /**
+ * Scroll down the email list to load more emails (infinite scroll)
+ * Outlook Web uses keyboard navigation for scrolling virtualized lists
+ * @param {import('playwright').Page} page
+ * @param {number} maxScrolls - Maximum number of scroll attempts
+ * @param {number} scrollDelay - Delay between scrolls in ms
+ * @returns {Promise<void>}
+ */
+async function scrollToLoadMoreEmails(page, maxScrolls = 10, scrollDelay = 2000) {
+    logger.info(`Starting infinite scroll (max ${maxScrolls} scrolls) to load more emails...`);
+
+    // Ensure body is focused for keyboard events
+    await page.focus('body');
+
+    for (let i = 0; i < maxScrolls; i++) {
+        // Get current email count before scrolling
+        const emailCountBefore = await page.evaluate(() => {
+            return document.querySelectorAll('[data-convid]').length;
+        });
+
+        logger.debug(`Scroll attempt ${i + 1}/${maxScrolls}, current email count: ${emailCountBefore}`);
+
+        // Use Page Down key to scroll the virtualized list
+        // This is more reliable than window.scrollBy for Outlook Web's virtualized list
+        await page.keyboard.press('PageDown');
+        logger.debug('Sent PageDown key');
+
+        // Wait for new content to load
+        logger.debug(`Waiting ${scrollDelay}ms for emails to load...`);
+        await page.waitForTimeout(scrollDelay);
+
+        // Check if new emails loaded
+        const emailCountAfter = await page.evaluate(() => {
+            return document.querySelectorAll('[data-convid]').length;
+        });
+
+        if (emailCountAfter === emailCountBefore) {
+            logger.info(`No new emails loaded after scroll ${i + 1}. Stopping scroll.`);
+            break;
+        }
+
+        logger.debug(`New email count: ${emailCountAfter}`);
+    }
+
+    // Final wait for any pending loads
+    await page.waitForTimeout(2000);
+}
+
+/**
  * List Outlook emails
  * @param {Object} options - Command options
  * @param {string} options.authFile - Path to authentication JSON file
@@ -594,16 +642,75 @@ async function listEmails(options = {}) {
             }
         }
 
-        // Scrape emails
-        let emails = await scrapeEmails(page);
+        // Get max results limit
+        const maxResults = options.maxResults ? parseInt(options.maxResults) : 5;
 
-        // Apply max results limit if specified
-        if (options.maxResults && options.maxResults > 0) {
-            emails = emails.slice(0, parseInt(options.maxResults));
-            logger.info(`Limited to first ${options.maxResults} results.`);
+        // If we need more than ~5 emails, scroll to load more (Outlook uses infinite scroll)
+        if (maxResults > 10) {
+            logger.info(`Requested ${maxResults} results - will scroll to load more emails.`);
+            
+            // Initial scrape
+            let allEmails = await scrapeEmails(page);
+            const uniqueEmails = new Map(); // Use Map to track unique emails by subject+sender
+
+            for (const email of allEmails) {
+                const key = `${email.subject}-${email.sender}`;
+                uniqueEmails.set(key, email);
+            }
+
+            logger.info(`Loaded ${uniqueEmails.size} unique emails so far.`);
+
+            // Scroll and load more until we have enough or no more emails
+            let scrollCount = 0;
+            const maxScrollBatches = Math.ceil((maxResults - uniqueEmails.size) / 8) + 5; // Extra buffer for scrolls
+
+            while (uniqueEmails.size < maxResults && scrollCount < maxScrollBatches) {
+                logger.info(`Scrolling to load more emails...`);
+                
+                await scrollToLoadMoreEmails(page, 4, 1000); // Scroll in batches of 4 with 1s delay
+                
+                const newEmails = await scrapeEmails(page);
+
+                let newlyAdded = 0;
+                for (const email of newEmails) {
+                    const key = `${email.subject}-${email.sender}`;
+                    if (!uniqueEmails.has(key)) {
+                        uniqueEmails.set(key, email);
+                        newlyAdded++;
+                    }
+                }
+
+                logger.info(`After scroll batch ${scrollCount + 1}: loaded ${newlyAdded} new emails, total unique: ${uniqueEmails.size}`);
+
+                if (newlyAdded === 0) {
+                    logger.info('No new emails found after scroll. Stopping.');
+                    break;
+                }
+
+                scrollCount++;
+            }
+
+            // Convert Map back to array and limit results
+            let emails = Array.from(uniqueEmails.values());
+
+            if (maxResults > 0 && emails.length > maxResults) {
+                emails = emails.slice(0, maxResults);
+                logger.info(`Limited to first ${maxResults} results.`);
+            }
+
+            return emails;
+        } else {
+            // For small result counts, just scrape once
+            let emails = await scrapeEmails(page);
+
+            // Apply max results limit if specified
+            if (options.maxResults && options.maxResults > 0) {
+                emails = emails.slice(0, parseInt(options.maxResults));
+                logger.info(`Limited to first ${options.maxResults} results.`);
+            }
+
+            return emails;
         }
-
-        return emails;
 
     } catch (e) {
         logger.error('Error listing emails:', e);
