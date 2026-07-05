@@ -520,6 +520,9 @@ async function scrapeEmails(page, tabOverride = 'Focus') {
 
         for (const row of msgRows) {
             try {
+                // Extract conversationId
+                const conversationId = row.getAttribute('data-convid') || '';
+
                 // Extract sender from span with title attribute containing email
                 const senderEl = row.querySelector('span[title*="@"]');
                 const sender = senderEl ? senderEl.getAttribute('title') || '' : '';
@@ -595,6 +598,7 @@ async function scrapeEmails(page, tabOverride = 'Focus') {
                 // Only include if we have at least a subject or sender
                 if (subject || sender) {
                     results.push({
+                        conversationId,
                         receivedDate: date,
                         subject,
                         sender,
@@ -628,37 +632,59 @@ async function scrollToLoadMoreEmails(page, maxScrolls = 10, scrollDelay = 2000)
     logger.info(`Starting infinite scroll (max ${maxScrolls} scrolls) to load more emails...`);
 
     for (let i = 0; i < maxScrolls; i++) {
-        // Get current email count before scrolling
-        const emailCountBefore = await page.evaluate(() => {
-            return document.querySelectorAll('[data-convid]').length;
-        });
-
-        logger.debug(`Scroll attempt ${i + 1}/${maxScrolls}, current email count: ${emailCountBefore}`);
-
-        // Try to scroll the mail list container directly
-        const scrolled = await page.evaluate(() => {
+        // Get state before scroll
+        const preState = await page.evaluate(() => {
             const row = document.querySelector('[data-convid]');
-            if (!row) return false;
-
+            const convIds = Array.from(document.querySelectorAll('[data-convid]')).map(el => el.getAttribute('data-convid') || '');
+            
+            if (!row) return { hasContainer: false, convIds, scrollTop: 0, scrollHeight: 0 };
+            
             let parent = row.parentElement;
             while (parent) {
                 const style = window.getComputedStyle(parent);
                 const isScrollable = parent.scrollHeight > parent.clientHeight &&
                                      (style.overflowY === 'auto' || style.overflowY === 'scroll');
                 if (isScrollable) {
-                    // Scroll down by the height of the container
-                    parent.scrollTop += parent.clientHeight;
-                    return true;
+                    return {
+                        hasContainer: true,
+                        scrollTop: parent.scrollTop,
+                        scrollHeight: parent.scrollHeight,
+                        convIds
+                    };
                 }
                 parent = parent.parentElement;
             }
-            return false;
+            return { hasContainer: false, convIds, scrollTop: 0, scrollHeight: 0 };
         });
 
-        if (scrolled) {
-            logger.debug('Scrolled email list container via scrollTop');
-        } else {
-            // Fallback to keyboard navigation if we couldn't find a scrollable container
+        logger.debug(`Scroll attempt ${i + 1}/${maxScrolls}, current DOM element count: ${preState.convIds.length}`);
+
+        // Try to scroll the mail list container directly via scrollTop modification
+        let scrolled = false;
+        if (preState.hasContainer) {
+            scrolled = await page.evaluate(() => {
+                const row = document.querySelector('[data-convid]');
+                if (!row) return false;
+                let parent = row.parentElement;
+                while (parent) {
+                    const style = window.getComputedStyle(parent);
+                    const isScrollable = parent.scrollHeight > parent.clientHeight &&
+                                         (style.overflowY === 'auto' || style.overflowY === 'scroll');
+                    if (isScrollable) {
+                        parent.scrollTop += parent.clientHeight;
+                        return true;
+                    }
+                    parent = parent.parentElement;
+                }
+                return false;
+            });
+            if (scrolled) {
+                logger.debug('Scrolled email list container via direct scrollTop');
+            }
+        }
+
+        // Fallback: Keyboard PageDown if direct scrollTop failed
+        if (!scrolled) {
             await page.keyboard.press('PageDown');
             logger.debug('Sent PageDown key (fallback)');
         }
@@ -667,17 +693,94 @@ async function scrollToLoadMoreEmails(page, maxScrolls = 10, scrollDelay = 2000)
         logger.debug(`Waiting ${scrollDelay}ms for emails to load...`);
         await page.waitForTimeout(scrollDelay);
 
-        // Check if new emails loaded
-        const emailCountAfter = await page.evaluate(() => {
-            return document.querySelectorAll('[data-convid]').length;
+        // Get state after scroll
+        const postState = await page.evaluate(() => {
+            const row = document.querySelector('[data-convid]');
+            const convIds = Array.from(document.querySelectorAll('[data-convid]')).map(el => el.getAttribute('data-convid') || '');
+            
+            if (!row) return { hasContainer: false, convIds, scrollTop: 0, scrollHeight: 0 };
+            
+            let parent = row.parentElement;
+            while (parent) {
+                const style = window.getComputedStyle(parent);
+                const isScrollable = parent.scrollHeight > parent.clientHeight &&
+                                     (style.overflowY === 'auto' || style.overflowY === 'scroll');
+                if (isScrollable) {
+                    return {
+                        hasContainer: true,
+                        scrollTop: parent.scrollTop,
+                        scrollHeight: parent.scrollHeight,
+                        convIds
+                    };
+                }
+                parent = parent.parentElement;
+            }
+            return { hasContainer: false, convIds, scrollTop: 0, scrollHeight: 0 };
         });
 
-        if (emailCountAfter === emailCountBefore) {
-            logger.info(`No new emails loaded after scroll ${i + 1}. Stopping scroll.`);
-            break;
+        // Determine if we actually scrolled or loaded new content
+        let scrollTopChanged = preState.hasContainer && postState.hasContainer && (postState.scrollTop > preState.scrollTop);
+        let scrollHeightChanged = preState.hasContainer && postState.hasContainer && (postState.scrollHeight > preState.scrollHeight);
+        
+        // Check if there are any new conversation IDs in the DOM
+        const preConvIdsSet = new Set(preState.convIds);
+        let hasNewConvIds = postState.convIds.some(id => !preConvIdsSet.has(id));
+
+        // If no changes were detected immediately, retry checking for a few seconds to account for network latency
+        if (!scrollTopChanged && !scrollHeightChanged && !hasNewConvIds) {
+            let resolved = false;
+            const maxRetries = 3;
+            for (let retry = 1; retry <= maxRetries; retry++) {
+                logger.debug(`No changes detected. Waiting for dynamic content load (retry ${retry}/${maxRetries})...`);
+                await page.waitForTimeout(1000);
+                
+                // Get post-state again
+                const retryState = await page.evaluate(() => {
+                    const row = document.querySelector('[data-convid]');
+                    const convIds = Array.from(document.querySelectorAll('[data-convid]')).map(el => el.getAttribute('data-convid') || '');
+                    if (!row) return { hasContainer: false, convIds, scrollTop: 0, scrollHeight: 0 };
+                    let parent = row.parentElement;
+                    while (parent) {
+                        const style = window.getComputedStyle(parent);
+                        const isScrollable = parent.scrollHeight > parent.clientHeight &&
+                                             (style.overflowY === 'auto' || style.overflowY === 'scroll');
+                        if (isScrollable) {
+                            return {
+                                hasContainer: true,
+                                scrollTop: parent.scrollTop,
+                                scrollHeight: parent.scrollHeight,
+                                convIds
+                            };
+                        }
+                        parent = parent.parentElement;
+                    }
+                    return { hasContainer: false, convIds, scrollTop: 0, scrollHeight: 0 };
+                });
+                
+                // Re-evaluate changes
+                const retryScrollTopChanged = preState.hasContainer && retryState.hasContainer && (retryState.scrollTop > preState.scrollTop);
+                const retryScrollHeightChanged = preState.hasContainer && retryState.hasContainer && (retryState.scrollHeight > preState.scrollHeight);
+                const retryHasNewConvIds = retryState.convIds.some(id => !preConvIdsSet.has(id));
+                
+                if (retryScrollTopChanged || retryScrollHeightChanged || retryHasNewConvIds) {
+                    logger.debug('Content loaded or scroll position updated during retry.');
+                    resolved = true;
+                    // Update variables for loop logging and next iteration
+                    scrollTopChanged = retryScrollTopChanged;
+                    scrollHeightChanged = retryScrollHeightChanged;
+                    hasNewConvIds = retryHasNewConvIds;
+                    Object.assign(postState, retryState);
+                    break;
+                }
+            }
+            
+            if (!resolved) {
+                logger.info(`No changes in scroll position, height, or elements after scroll ${i + 1} and retries. Stopping scroll.`);
+                break;
+            }
         }
 
-        logger.debug(`New email count: ${emailCountAfter}`);
+        logger.debug(`Scroll success. New DOM element count: ${postState.convIds.length}`);
     }
 
     // Final wait for any pending loads
@@ -838,7 +941,7 @@ async function listEmails(options = {}) {
                 let newEmails = await scrapeEmails(page, currentTabCategory);
 
                 for (const email of newEmails) {
-                    const key = `${email.subject}-${email.sender}`;
+                    const key = email.conversationId || `${email.subject || ''}-${email.sender || ''}-${email.receivedDate || ''}`;
                     if (!uniqueEmails.has(key)) {
                         uniqueEmails.set(key, email);
                     }
@@ -859,7 +962,7 @@ async function listEmails(options = {}) {
 
                     let newlyAdded = 0;
                     for (const email of newerEmails) {
-                        const key = `${email.subject}-${email.sender}`;
+                        const key = email.conversationId || `${email.subject || ''}-${email.sender || ''}-${email.receivedDate || ''}`;
                         if (!uniqueEmails.has(key)) {
                             uniqueEmails.set(key, email);
                             newlyAdded++;
