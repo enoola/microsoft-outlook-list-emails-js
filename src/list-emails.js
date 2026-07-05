@@ -276,7 +276,7 @@ async function navigateToOutlook(page) {
             logger.info('Microsoft account confirmation page detected.');
             
             // Wait 15 seconds before clicking to ensure page is stable
-            await page.waitForTimeout(15000);
+            await page.waitForTimeout(10000);
 
             // Try to find and click #newSessionLink
             try {
@@ -305,7 +305,7 @@ async function navigateToOutlook(page) {
                 
                 // Wait for the mail interface to load
                 logger.info('Waiting 15 seconds for Outlook mail interface to load...');
-                await page.waitForTimeout(15000);
+                await page.waitForTimeout(10000);
                 await waitForPageLoad(page, 20000);
             } catch (e) {
                 logger.warn(`Could not click #newSessionLink: ${e.message}`);
@@ -327,7 +327,7 @@ async function navigateToOutlook(page) {
                     
                     if (clicked) {
                         logger.success('Successfully clicked #newSessionLink via JavaScript fallback.');
-                        await page.waitForTimeout(15000);
+                        await page.waitForTimeout(10000);
                     } else {
                         logger.warn('Could not find #newSessionLink even via JS scan.');
                     }
@@ -339,7 +339,7 @@ async function navigateToOutlook(page) {
             logger.info('No account confirmation page detected, waiting for mail interface...');
             
             // Wait 15 seconds then check again
-            await page.waitForTimeout(15000);
+            await page.waitForTimeout(10000);
             const newUrl = page.url();
             if (newUrl.includes('/mail/')) {
                 logger.success(`Reached mail interface: ${newUrl}`);
@@ -348,7 +348,7 @@ async function navigateToOutlook(page) {
 
         // Final wait for the page to stabilize
         logger.info('Waiting 15 seconds for final page stabilization...');
-        await page.waitForTimeout(15000);
+        await page.waitForTimeout(10000);
     }
 }
 
@@ -496,126 +496,45 @@ async function scrapeEmails(page) {
     
     logger.debug(`Current URL after stabilization: ${page.url()}`);
 
-    // Try multiple selectors in sequence with increasing timeouts
-    const EMAIL_SELECTORS = [
-        '[aria-label*="message list"]',
-        '[role="grid"][aria-label*="mail"]',
-        'table[role="grid"]',
-        '.owaRoot table',
-        '#appContainer table',
-        'div[data-automationid*="msg"]'
-    ];
-
-    let foundSelector = null;
-    for (const selector of EMAIL_SELECTORS) {
-        try {
-            logger.info(`Trying selector: ${selector}`);
-            await page.waitForSelector(selector, { state: 'visible', timeout: 20000 });
-            foundSelector = selector;
-            logger.success(`Email list detected using selector: ${selector}`);
-            break;
-        } catch (e) {
-            // Try next selector
-        }
-    }
-
-    if (!foundSelector) {
-        // Last resort: look for any table with email-like content
-        logger.info('Trying to find any table with email content...');
-        
-        try {
-            await page.waitForFunction(() => {
-                const tables = document.querySelectorAll('table');
-                for (const table of tables) {
-                    const hasEmail = Array.from(table.querySelectorAll('td, th')).some(td => 
-                        td.innerText.includes('@') && td.innerText.length > 5
-                    );
-                    if (hasEmail) return true;
-                }
-                return false;
-            }, { timeout: 30000 });
-            
-            logger.success('Found table with email content.');
-        } catch (e) {
-            logger.warn(`Could not find any table with email content: ${e.message}`);
-        }
-    }
-
-    // Scrape email data
+    // Scrape email data using the actual Outlook Web App DOM structure
     const emails = await page.evaluate(() => {
         const results = [];
 
-        // Try multiple selectors for Outlook mail list items
-        const selectors = [
-            '[aria-label*="message list"] tr',
-            '[role="grid"][aria-label*="mail"] tr',
-            'table[role="grid"] tr',
-            '.owaRoot table tr',
-            '#appContainer table tr',
-            'div[data-automationid*="msg"]'
-        ];
+        // Find all message rows - these are divs with data-convid attribute
+        const msgRows = document.querySelectorAll('[data-convid]');
 
-        let rows = [];
-        for (const selector of selectors) {
+        for (const row of msgRows) {
             try {
-                rows = Array.from(document.querySelectorAll(selector));
-                if (rows.length > 0) {
-                    break;
-                }
-            } catch (e) {}
-        }
+                // Extract sender from span with title attribute containing email
+                const senderEl = row.querySelector('span[title*="@"]');
+                const sender = senderEl ? senderEl.getAttribute('title') || '' : '';
 
-        console.log(`Found ${rows.length} potential email rows.`);
-
-        // Process each row
-        for (const row of rows) {
-            try {
-                // Try to extract date
-                let receivedDate = '';
-                const dateCell = row.querySelector('[aria-label*="date"], [data-automationid*="date"]') ||
-                                row.querySelector('td:nth-child(1)') ||
-                                row.querySelector('.receivedTime');
-                if (dateCell) {
-                    receivedDate = dateCell.textContent.trim() || '';
-                }
-
-                // Try to extract subject
+                // Extract subject from TtcXM class or aria-label
+                const subjectEl = row.querySelector('.TtcXM, [aria-label*="Unread"], [aria-label*="Read"]');
                 let subject = '';
-                const subjectCell = row.querySelector('[aria-label*="subject"], [data-automationid*="subject"]') ||
-                                  row.querySelector('td:nth-child(2), td:nth-child(3)') ||
-                                  row.querySelector('.subject');
-                if (subjectCell) {
-                    subject = subjectCell.textContent.trim() || '';
+                if (subjectEl) {
+                    subject = subjectEl.textContent.trim() || subjectEl.getAttribute('aria-label') || '';
                 }
 
-                // Try to extract sender
-                let sender = '';
-                const senderCell = row.querySelector('[aria-label*="from"], [data-automationid*="from"]') ||
-                                 row.querySelector('td:nth-child(3), td:nth-child(4)') ||
-                                 row.querySelector('.senderName');
-                if (senderCell) {
-                    sender = senderCell.textContent.trim() || '';
-                }
+                // Extract date from qq2gS class
+                const dateEl = row.querySelector('.qq2gS._rWRU');
+                const date = dateEl ? dateEl.getAttribute('title') || '' : '';
 
-                // Try to extract first body line (if available in preview)
-                let firstBodyLine = '';
-                const bodyCell = row.querySelector('[aria-label*="body"], [data-automationid*="body"]') ||
-                               row.querySelector('.previewText');
-                if (bodyCell) {
-                    firstBodyLine = bodyCell.textContent.trim().split('\n')[0] || '';
-                }
+                // Extract preview text
+                const previewEl = row.querySelector('.FqgPc, .Zgp3k span');
+                const preview = previewEl ? previewEl.textContent.trim().substring(0, 150) : '';
 
-                // Only add if we have at least subject
-                if (subject) {
+                // Only include if we have at least a subject or sender
+                if (subject || sender) {
                     results.push({
-                        receivedDate,
+                        receivedDate: date,
                         subject,
                         sender,
-                        firstBodyLine
+                        firstBodyLine: preview
                     });
                 }
             } catch (e) {
-                console.log(`Error parsing row: ${e.message}`);
+                console.log(`Error extracting row: ${e.message}`);
             }
         }
 
@@ -648,16 +567,19 @@ async function listEmails(options = {}) {
     
     const browser = await chromium.launch({ headless });
     const context = await browser.newContext({ storageState: options.authFile });
-    
+
     try {
         const page = await context.newPage();
 
-        // Navigate to Outlook
-        await navigateToOutlook(page);
+        // Navigate directly to Outlook - the auth state should handle any intermediate redirects
+        logger.info(`Navigating to Outlook: ${OUTLOOK_URL}`);
+        await page.goto(OUTLOOK_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
         
-        // Wait for page to be stable before any operations
-        logger.info('Waiting for page to stabilize...');
-        await page.waitForTimeout(3000);
+        // Wait for any client-side redirects to complete
+        logger.info('Waiting 15 seconds for any intermediate redirects...');
+        await page.waitForTimeout(15000);
+        
+        logger.success(`Reached mail interface: ${page.url()}`);
 
         // Dump debug content if requested (after navigation is complete)
         if (options.dodump) {
@@ -671,18 +593,18 @@ async function listEmails(options = {}) {
                 logger.warn(`Could not dump page content: ${e.message}`);
             }
         }
-        
+
         // Scrape emails
         let emails = await scrapeEmails(page);
-        
+
         // Apply max results limit if specified
         if (options.maxResults && options.maxResults > 0) {
             emails = emails.slice(0, parseInt(options.maxResults));
             logger.info(`Limited to first ${options.maxResults} results.`);
         }
-        
+
         return emails;
-        
+
     } catch (e) {
         logger.error('Error listing emails:', e);
         throw e;

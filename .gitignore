@@ -5,3 +5,6 @@ auth.json
 *.log
 .DS_Store
 diag-dumps/
+.qwen/
+.playwright-mcp/
+
