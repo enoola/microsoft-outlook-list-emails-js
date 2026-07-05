@@ -13,7 +13,7 @@ const AUTH_DIR = getAuthDir();
 const AUTH_FILE = path.join(AUTH_DIR, 'auth.json');
 
 // Outlook URLs
-const OUTLOOK_URL = 'https://outlook.cloud.microsoft/mail/';
+const OUTLOOK_URL = 'https://outlook.live.com/mail/';
 const MICROSOFT_LOGIN_URL_PATTERN = 'login.microsoftonline.com';
 
 module.exports = {
