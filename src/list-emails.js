@@ -712,52 +712,95 @@ async function listEmails(options = {}) {
             }
         }
 
-        // Get max results limit
+        // Get max results limit - 0 means "all emails"
         const maxResults = options.maxResults ? parseInt(options.maxResults) : 5;
+        const fetchAll = maxResults === 0;
+
+        if (fetchAll) {
+            logger.info('Fetching ALL available emails from both Focused and Other tabs (--max-results 0)');
+        } else {
+            logger.info(`Requested ${maxResults} results`);
+        }
 
         // If we need more than ~5 emails, scroll to load more (Outlook uses infinite scroll)
-        if (maxResults > 10) {
-            logger.info(`Requested ${maxResults} results - will scroll to load more emails.`);
-            
-            // Initial scrape
-            let allEmails = await scrapeEmails(page);
+        if (fetchAll || maxResults > 10) {
+            logger.info('Will use infinite scroll to load more emails.');
+
+            let allEmails = [];
             const uniqueEmails = new Map(); // Use Map to track unique emails by subject+sender
+            const tabsToFetch = fetchAll ? ['Focused', 'Other'] : ['Focused'];
 
-            for (const email of allEmails) {
-                const key = `${email.subject}-${email.sender}`;
-                uniqueEmails.set(key, email);
-            }
+            for (const tabName of tabsToFetch) {
+                if (tabsToFetch.length > 1 && tabName === 'Other') {
+                    logger.info('Switching from Focused to Other tab...');
+                    const switched = await switchToOtherTab(page);
+                    if (!switched) {
+                        logger.warn('Failed to switch to Other tab, continuing with Focused emails only.');
+                        break;
+                    }
+                }
 
-            logger.info(`Loaded ${uniqueEmails.size} unique emails so far.`);
+                logger.info(`Fetching emails from ${tabName} tab...`);
 
-            // Scroll and load more until we have enough or no more emails
-            let scrollCount = 0;
-            const maxScrollBatches = Math.ceil((maxResults - uniqueEmails.size) / 8) + 5; // Extra buffer for scrolls
+                // Initial scrape
+                let newEmails = await scrapeEmails(page);
 
-            while (uniqueEmails.size < maxResults && scrollCount < maxScrollBatches) {
-                logger.info(`Scrolling to load more emails...`);
-                
-                await scrollToLoadMoreEmails(page, 4, 1000); // Scroll in batches of 4 with 1s delay
-                
-                const newEmails = await scrapeEmails(page);
-
-                let newlyAdded = 0;
                 for (const email of newEmails) {
                     const key = `${email.subject}-${email.sender}`;
                     if (!uniqueEmails.has(key)) {
                         uniqueEmails.set(key, email);
-                        newlyAdded++;
                     }
                 }
 
-                logger.info(`After scroll batch ${scrollCount + 1}: loaded ${newlyAdded} new emails, total unique: ${uniqueEmails.size}`);
+                logger.info(`Loaded ${uniqueEmails.size} unique emails from ${tabName} tab so far.`);
 
-                if (newlyAdded === 0) {
-                    logger.info('No new emails found after scroll. Stopping.');
-                    break;
+                // Scroll and load more until no more emails
+                let scrollCount = 0;
+                const maxScrollBatches = fetchAll ? 50042 : Math.ceil((maxResults - uniqueEmails.size) / 8) + 5;
+
+                while (true) {
+                    logger.info(`Scrolling in ${tabName} tab to load more emails...`);
+
+                    await scrollToLoadMoreEmails(page, 4, 1000); // Scroll in batches of 4 with 1s delay
+
+                    const newerEmails = await scrapeEmails(page);
+
+                    let newlyAdded = 0;
+                    for (const email of newerEmails) {
+                        const key = `${email.subject}-${email.sender}`;
+                        if (!uniqueEmails.has(key)) {
+                            uniqueEmails.set(key, email);
+                            newlyAdded++;
+                        }
+                    }
+
+                    logger.info(`After scroll batch ${scrollCount + 1} in ${tabName}: loaded ${newlyAdded} new emails, total unique: ${uniqueEmails.size}`);
+
+                    // If no new emails were added, we've reached the end of this tab
+                    if (newlyAdded === 0) {
+                        logger.info(`No more new emails found in ${tabName} tab.`);
+                        break;
+                    }
+
+                    scrollCount++;
+
+                    // Safety limit to prevent infinite loops
+                    if (scrollCount >= maxScrollBatches) {
+                        logger.warn(`Reached maximum scroll batches (${maxScrollBatches}) in ${tabName}. Stopping.`);
+                        break;
+                    }
+
+                    // If not fetching all and reached limit, stop
+                    if (!fetchAll && uniqueEmails.size >= maxResults) {
+                        break;
+                    }
                 }
 
-                scrollCount++;
+                // If not fetching all and reached limit, stop
+                if (!fetchAll && uniqueEmails.size >= maxResults) {
+                    logger.info(`Reached requested limit of ${maxResults} emails.`);
+                    break;
+                }
             }
 
             // Convert Map back to array and limit results
@@ -790,4 +833,55 @@ async function listEmails(options = {}) {
     }
 }
 
-module.exports = { listEmails, listEmailsCount, handleMicrosoftLoginConfirm };
+module.exports = { listEmails, listEmailsCount, handleMicrosoftLoginConfirm, switchToOtherTab };
+
+/**
+ * Switch to the "Other" tab by clicking the Other button
+ * @param {import('playwright').Page} page
+ * @returns {Promise<boolean>} true if switch succeeded, false otherwise
+ */
+async function switchToOtherTab(page) {
+    logger.info('Looking for "Other" tab button...');
+
+    try {
+        // Wait a moment for the UI to stabilize
+        await page.waitForTimeout(2000);
+
+        // Try to find and click the "Other" button
+        const clicked = await page.evaluate(() => {
+            // Look for buttons with text "Other"
+            const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+
+            for (const el of buttons) {
+                const text = el.innerText || el.textContent || '';
+                if (text.trim().toLowerCase() === 'other') {
+                    try {
+                        el.click();
+                        return true;
+                    } catch (e) {
+                        // Try alternative click method
+                        const event = new MouseEvent('click', { bubbles: true });
+                        el.dispatchEvent(event);
+                        return true;
+                    }
+                }
+            }
+
+            return false;
+        });
+
+        if (clicked) {
+            logger.info('Clicked "Other" tab button, waiting for content to load...');
+            // Wait for the page to update
+            await page.waitForTimeout(5000);
+            logger.success('Switched to "Other" tab.');
+            return true;
+        } else {
+            logger.warn('Could not find "Other" tab button.');
+            return false;
+        }
+    } catch (e) {
+        logger.error(`Error switching to Other tab: ${e.message}`);
+        return false;
+    }
+}
