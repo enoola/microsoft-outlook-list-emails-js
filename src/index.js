@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 const { program } = require('commander');
 const logger = require('./utils/logger');
+const fs = require('fs-extra');
 const { listEmails } = require('./list-emails');
 
 program
@@ -15,13 +16,21 @@ program
     .option('--notheadless', 'Run in visible browser mode for debugging')
     .option('--dodump', 'Dump HTML content to files for debugging')
     .option('--max-results <n>', 'Limit number of results returned')
+    .option('--output-file <filename>', 'Write email list to JSON file instead of stdout')
     .action(async (options) => {
         try {
             const emails = await listEmails(options);
-            
+
             // Output as JSON
-            console.log(JSON.stringify(emails, null, 2));
+            const jsonOutput = JSON.stringify(emails, null, 2);
             
+            if (options.outputFile) {
+                await fs.writeFile(options.outputFile, jsonOutput, 'utf8');
+                logger.success(`Email list written to ${options.outputFile}`);
+            } else {
+                console.log(jsonOutput);
+            }
+
             if (emails.length === 0) {
                 logger.warn('No emails found.');
             } else {
