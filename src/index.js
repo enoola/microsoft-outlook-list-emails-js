@@ -2,7 +2,51 @@
 const { program } = require('commander');
 const logger = require('./utils/logger');
 const fs = require('fs-extra');
+const chalk = require('chalk');
 const { listEmails, listEmailsCount } = require('./list-emails');
+
+// Track start time for duration calculation
+const startTime = new Date();
+
+/**
+ * Format duration from start time to now
+ * @returns {string} Formatted duration string
+ */
+function formatDuration() {
+    const endTime = new Date();
+    const diffMs = endTime - startTime;
+    
+    const hours = Math.floor(diffMs / 3600000);
+    const minutes = Math.floor((diffMs % 3600000) / 60000);
+    const seconds = Math.floor((diffMs % 60000) / 1000);
+    
+    let duration = '';
+    if (hours > 0) duration += `${hours} hour${hours > 1 ? 's' : ''} `;
+    if (minutes > 0) duration += `${minutes} minute${minutes > 1 ? 's' : ''} `;
+    duration += `${seconds} second${seconds > 1 ? 's' : ''}`;
+    
+    return duration.trim();
+}
+
+/**
+ * Log command start
+ */
+function logCommandStart() {
+    const now = new Date().toISOString();
+    logger.info(`Command started at ${now}`);
+}
+
+/**
+ * Log command end with duration
+ */
+function logCommandEnd(success) {
+    const now = new Date().toISOString();
+    if (success) {
+        console.log(chalk.green(`[SUCCESS] Command completed at ${now} (Duration: ${formatDuration()})`));
+    } else {
+        console.log(chalk.red(`[ERROR] Command failed at ${now} (Duration: ${formatDuration()})`));
+    }
+}
 
 program
     .name('outlook-list')
@@ -19,6 +63,8 @@ program
     .option('--output-file <filename>', 'Write email list to JSON file instead of stdout')
     .option('--count', 'Return only the total count of emails')
     .action(async (options) => {
+        logCommandStart();
+        
         try {
             if (options.count) {
                 const count = await listEmailsCount(options);
@@ -43,8 +89,11 @@ program
                     logger.success(`Listed ${emails.length} email(s).`);
                 }
             }
+            
+            logCommandEnd(true);
         } catch (e) {
             logger.error('Failed to list emails.', e);
+            logCommandEnd(false);
             process.exit(1);
         }
     });
