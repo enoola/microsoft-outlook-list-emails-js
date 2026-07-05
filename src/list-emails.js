@@ -556,9 +556,6 @@ async function scrapeEmails(page) {
 async function scrollToLoadMoreEmails(page, maxScrolls = 10, scrollDelay = 2000) {
     logger.info(`Starting infinite scroll (max ${maxScrolls} scrolls) to load more emails...`);
 
-    // Ensure body is focused for keyboard events
-    await page.focus('body');
-
     for (let i = 0; i < maxScrolls; i++) {
         // Get current email count before scrolling
         const emailCountBefore = await page.evaluate(() => {
@@ -567,8 +564,8 @@ async function scrollToLoadMoreEmails(page, maxScrolls = 10, scrollDelay = 2000)
 
         logger.debug(`Scroll attempt ${i + 1}/${maxScrolls}, current email count: ${emailCountBefore}`);
 
-        // Use Page Down key to scroll the virtualized list
-        // This is more reliable than window.scrollBy for Outlook Web's virtualized list
+        // Use keyboard navigation to scroll the virtualized list
+        // This is required for Outlook Web's infinite scroll to work
         await page.keyboard.press('PageDown');
         logger.debug('Sent PageDown key');
 
