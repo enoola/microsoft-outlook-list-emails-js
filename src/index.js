@@ -59,7 +59,7 @@ program
     .requiredOption('--auth-file <path>', 'Path to authentication JSON file (auth.json)')
     .option('--notheadless', 'Run in visible browser mode for debugging')
     .option('--dodump', 'Dump HTML content to files for debugging')
-    .option('--max-results <n>', 'Limit number of results returned')
+    .option('--max-results <n>', 'Limit number of results returned (0 = all emails from both Focused and Other tabs)')
     .option('--output-file <filename>', 'Write email list to JSON file instead of stdout')
     .option('--count', 'Return only the total count of emails')
     .action(async (options) => {
