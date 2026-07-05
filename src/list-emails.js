@@ -355,9 +355,10 @@ async function navigateToOutlook(page) {
 /**
  * Scrape emails from the current page
  * @param {import('playwright').Page} page
+ * @param {string} [tabOverride] - Optional category override ('Focus' or 'Other')
  * @returns {Promise<Array>} Array of email objects
  */
-async function scrapeEmails(page) {
+async function scrapeEmails(page, tabOverride = 'Focus') {
     logger.info('Scraping emails from mail list...');
 
     let currentUrl = page.url();
@@ -511,7 +512,7 @@ async function scrapeEmails(page) {
     logger.debug(`Current URL after stabilization: ${page.url()}`);
 
     // Scrape email data using the actual Outlook Web App DOM structure
-    const emails = await page.evaluate(() => {
+    const emails = await page.evaluate((tabOverride) => {
         const results = [];
 
         // Find all message rows - these are divs with data-convid attribute
@@ -538,13 +539,68 @@ async function scrapeEmails(page) {
                 const previewEl = row.querySelector('.FqgPc, .Zgp3k span');
                 const preview = previewEl ? previewEl.textContent.trim().substring(0, 150) : '';
 
+                // Determine status (read/unread)
+                let status = 'read';
+                const rowAria = row.getAttribute('aria-label') || '';
+                const rowAriaLower = rowAria.toLowerCase().trim();
+                
+                if (/^(unread|non\s+lu)\b/i.test(rowAriaLower)) {
+                    status = 'unread';
+                } else if (/^(read|lu)\b/i.test(rowAriaLower)) {
+                    status = 'read';
+                } else {
+                    // Check action buttons as fallback
+                    const hasMarkRead = row.querySelector('[aria-label*="Mark as read" i], [aria-label*="Marquer comme lu" i], [title*="Mark as read" i], [title*="Marquer comme lu" i]');
+                    const hasMarkUnread = row.querySelector('[aria-label*="Mark as unread" i], [aria-label*="Marquer comme non lu" i], [title*="Mark as unread" i], [title*="Marquer comme non lu" i]');
+                    
+                    if (hasMarkRead) {
+                        status = 'unread';
+                    } else if (hasMarkUnread) {
+                        status = 'read';
+                    } else {
+                        // Check if any child element's aria-label starts with unread/non lu
+                        const childArias = Array.from(row.querySelectorAll('[aria-label]')).map(c => (c.getAttribute('aria-label') || '').toLowerCase());
+                        const isUnread = childArias.some(a => /^(unread|non\s+lu)\b/i.test(a));
+                        if (isUnread) {
+                            status = 'unread';
+                        }
+                    }
+                }
+
+                // Determine category (Focus or Other)
+                let category = tabOverride || 'Focus';
+                try {
+                    const buttons = Array.from(document.querySelectorAll('button, div[role="button"], a'));
+                    for (const el of buttons) {
+                        const text = (el.innerText || el.textContent || '').trim().toLowerCase();
+                        const isFocusedBtn = text === 'focused' || text === 'focus' || text === 'prioritaire' || text === 'courrier prioritaire';
+                        const isOtherBtn = text === 'other' || text === 'autres';
+                        
+                        if (isFocusedBtn || isOtherBtn) {
+                            const isSelected = el.getAttribute('aria-selected') === 'true' || 
+                                               el.getAttribute('aria-checked') === 'true' ||
+                                               el.classList.contains('is-selected') || 
+                                               el.classList.contains('active') ||
+                                               el.querySelector('[class*="selected"]') !== null;
+                            if (isSelected) {
+                                category = isFocusedBtn ? 'Focus' : 'Other';
+                                break;
+                            }
+                        }
+                    }
+                } catch (e) {
+                    // Ignore DOM errors and use override/default
+                }
+
                 // Only include if we have at least a subject or sender
                 if (subject || sender) {
                     results.push({
                         receivedDate: date,
                         subject,
                         sender,
-                        firstBodyLine: preview
+                        firstBodyLine: preview,
+                        status,
+                        category
                     });
                 }
             } catch (e) {
@@ -553,7 +609,7 @@ async function scrapeEmails(page) {
         }
 
         return results;
-    });
+    }, tabOverride);
 
     logger.success(`Scraped ${emails.length} emails.`);
     return emails;
@@ -775,10 +831,11 @@ async function listEmails(options = {}) {
                     }
                 }
 
+                const currentTabCategory = tabName === 'Focused' ? 'Focus' : 'Other';
                 logger.info(`Fetching emails from ${tabName} tab...`);
 
                 // Initial scrape
-                let newEmails = await scrapeEmails(page);
+                let newEmails = await scrapeEmails(page, currentTabCategory);
 
                 for (const email of newEmails) {
                     const key = `${email.subject}-${email.sender}`;
@@ -798,7 +855,7 @@ async function listEmails(options = {}) {
 
                     await scrollToLoadMoreEmails(page, 4, 1000); // Scroll in batches of 4 with 1s delay
 
-                    const newerEmails = await scrapeEmails(page);
+                    const newerEmails = await scrapeEmails(page, currentTabCategory);
 
                     let newlyAdded = 0;
                     for (const email of newerEmails) {
@@ -849,7 +906,7 @@ async function listEmails(options = {}) {
             return emails;
         } else {
             // For small result counts, just scrape once
-            let emails = await scrapeEmails(page);
+            let emails = await scrapeEmails(page, 'Focus');
 
             // Apply max results limit if specified
             if (options.maxResults && options.maxResults > 0) {
