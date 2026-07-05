@@ -594,6 +594,76 @@ async function scrollToLoadMoreEmails(page, maxScrolls = 10, scrollDelay = 2000)
 }
 
 /**
+ * List Outlook emails count
+ * @param {Object} options - Command options
+ * @param {string} options.authFile - Path to authentication JSON file
+ * @param {boolean} [options.notheadless] - Run in visible browser mode
+ * @returns {Promise<number>} Total number of emails in inbox
+ */
+async function listEmailsCount(options = {}) {
+    logger.info('Getting Outlook email count...');
+
+    const headless = !options.notheadless;
+    logger.debug(`Launching browser (headless: ${headless})...`);
+
+    // Check auth file exists
+    if (!(await fs.pathExists(options.authFile))) {
+        throw new Error(`Authentication file not found: ${options.authFile}`);
+    }
+
+    const browser = await chromium.launch({ headless });
+    const context = await browser.newContext({ storageState: options.authFile });
+
+    try {
+        const page = await context.newPage();
+
+        // Navigate to Outlook
+        logger.info(`Navigating to Outlook: ${OUTLOOK_URL}`);
+        await page.goto(OUTLOOK_URL, { waitUntil: 'domcontentloaded', timeout: 30000 });
+
+        // Wait for redirects and page load
+        logger.info('Waiting 15 seconds for any intermediate redirects...');
+        await page.waitForTimeout(15000);
+
+        logger.success(`Reached mail interface: ${page.url()}`);
+
+        // Wait for the inbox count element to appear
+        // Pattern: title="Inbox - 529 items (459 unread)"
+        logger.info('Waiting for inbox count element...');
+        await page.waitForSelector('[title*="items"]', { state: 'visible', timeout: 30000 });
+
+        // Extract the count from the title attribute
+        const inboxInfo = await page.evaluate(() => {
+            // Find elements with title containing "items"
+            const elements = document.querySelectorAll('[title*="items"]');
+            
+            for (const el of elements) {
+                const title = el.getAttribute('title') || '';
+                // Match pattern: "Inbox - X items (Y unread)" or similar
+                const match = title.match(/(\d+)\s+items?/);
+                if (match) {
+                    return { count: parseInt(match[1], 10), fullTitle: title };
+                }
+            }
+            return null;
+        });
+
+        if (!inboxInfo || !inboxInfo.count) {
+            throw new Error('Could not find inbox count element. Expected format: "Inbox - X items (Y unread)"');
+        }
+
+        logger.success(`Found inbox count: ${inboxInfo.count} (${inboxInfo.fullTitle})`);
+        return inboxInfo.count;
+
+    } catch (e) {
+        logger.error('Error listing email count:', e);
+        throw e;
+    } finally {
+        await browser.close();
+    }
+}
+
+/**
  * List Outlook emails
  * @param {Object} options - Command options
  * @param {string} options.authFile - Path to authentication JSON file
@@ -720,4 +790,4 @@ async function listEmails(options = {}) {
     }
 }
 
-module.exports = { listEmails, handleMicrosoftLoginConfirm };
+module.exports = { listEmails, listEmailsCount, handleMicrosoftLoginConfirm };
