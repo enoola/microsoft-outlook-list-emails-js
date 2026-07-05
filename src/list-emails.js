@@ -360,139 +360,153 @@ async function navigateToOutlook(page) {
 async function scrapeEmails(page) {
     logger.info('Scraping emails from mail list...');
 
-    // Check if we're on Microsoft login page (due to client-side redirect)
-    const currentUrl = page.url();
+    let currentUrl = page.url();
     
-    // Wait 15 seconds before checking for login page
-    logger.info('Waiting 15 seconds for any redirects...');
-    await page.waitForTimeout(15000);
-    
-    if (currentUrl.includes('login.microsoftonline.com') || currentUrl.includes('login.live.com')) {
-        logger.warn(`We are on Microsoft login page (${currentUrl}) instead of Outlook mail.`);
-        
-        // Wait 15 seconds for the confirmation/selection page to load
-        await page.waitForTimeout(15000);
-
+    // If we are not yet on the mail interface, check for login redirects
+    if (!currentUrl.includes('/mail/')) {
+        // Wait up to 10 seconds for either the login page, session confirmation, or the mail list
+        logger.info('Not on mail interface yet. Waiting for redirect or page load...');
         try {
-            // First, check for confirmation page with #newSessionLink
-            const hasNewSessionLink = await page.$eval('body', (body) => {
-                return document.querySelector('#newSessionLink') !== null;
-            }).catch(() => false);
+            await page.waitForSelector('[data-convid], #newSessionLink, [data-bind*="account"], .entry-button', { timeout: 10000 });
+        } catch (e) {
+            logger.debug(`Timeout waiting for initial page state: ${e.message}`);
+        }
 
-            if (hasNewSessionLink) {
-                const link = page.locator('#newSessionLink').first();
-                logger.info('Found "#newSessionLink" - clicking to confirm session...');
+        currentUrl = page.url();
 
-                // Wait for navigation after click
-                await Promise.all([
-                    page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }),
-                    link.click()
-                ]);
+        if (currentUrl.includes('login.microsoftonline.com') || currentUrl.includes('login.live.com')) {
+            logger.warn(`We are on Microsoft login page (${currentUrl}) instead of Outlook mail.`);
+            
+            // Wait up to 5 seconds for login elements to be stable/visible
+            try {
+                await page.waitForSelector('#newSessionLink, [data-bind*="account"], .entry-button', { timeout: 5000 });
+            } catch (e) {
+                logger.debug(`Timeout waiting for login confirmation elements: ${e.message}`);
+            }
 
-                logger.success('Redirected after confirming session.');
-            } else {
-                // Check for account selection page (prompt=select_account)
-                const isSelectionPage = await page.$eval('body', (body) => {
-                    return body.innerText.includes('Sign in') &&
-                           document.querySelector('[data-bind*="account"]') !== null;
+            try {
+                // First, check for confirmation page with #newSessionLink
+                const hasNewSessionLink = await page.$eval('body', (body) => {
+                    return document.querySelector('#newSessionLink') !== null;
                 }).catch(() => false);
 
-                if (isSelectionPage) {
-                    logger.info('Account selection page detected - attempting to select account...');
+                if (hasNewSessionLink) {
+                    const link = page.locator('#newSessionLink').first();
+                    logger.info('Found "#newSessionLink" - clicking to confirm session...');
 
-                    // Try to click the first account button with email text
+                    // Wait for navigation after click
+                    await Promise.all([
+                        page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 30000 }),
+                        link.click()
+                    ]);
+
+                    logger.success('Redirected after confirming session.');
+                } else {
+                    // Check for account selection page (prompt=select_account)
+                    const isSelectionPage = await page.$eval('body', (body) => {
+                        return body.innerText.includes('Sign in') &&
+                               document.querySelector('[data-bind*="account"]') !== null;
+                    }).catch(() => false);
+
+                    if (isSelectionPage) {
+                        logger.info('Account selection page detected - attempting to select account...');
+
+                        // Try to click the first account button with email text
+                        const clicked = await page.evaluate(() => {
+                            const buttons = Array.from(document.querySelectorAll('button, a'));
+                            
+                            for (const btn of buttons) {
+                                const text = btn.innerText.toLowerCase();
+                                if ((text.includes('@') && text.length < 50) || 
+                                    text.includes('sign in')) {
+                                    try {
+                                        btn.click();
+                                        return true;
+                                    } catch (e) {
+                                        const event = new MouseEvent('click', { bubbles: true });
+                                        btn.dispatchEvent(event);
+                                        return true;
+                                    }
+                                }
+                            }
+                            
+                            // Fallback: click any primary button
+                            for (const btn of buttons) {
+                                if (btn.classList.contains('btn-primary') || 
+                                    btn.getAttribute('type') === 'submit') {
+                                    try {
+                                        btn.click();
+                                        return true;
+                                    } catch (e) {
+                                        const event = new MouseEvent('click', { bubbles: true });
+                                        btn.dispatchEvent(event);
+                                        return true;
+                                    }
+                                }
+                            }
+                            
+                            return false;
+                        });
+
+                        if (clicked) {
+                            logger.success('Selected account from selection page.');
+                        } else {
+                            logger.warn('Could not find account button to click.');
+                        }
+                    } else {
+                        logger.warn('Neither confirmation nor selection page detected, waiting for redirect...');
+                    }
+                }
+
+                // Wait dynamically for the mail interface URL to load
+                logger.info('Waiting for Outlook mail interface URL to load...');
+                await page.waitForURL(url => url.includes('/mail/'), { timeout: 20000 });
+                logger.success('Mail interface URL loaded.');
+            } catch (e) {
+                logger.error(`Failed to handle Microsoft login confirmation in scrapeEmails: ${e.message}`);
+                
+                // Try JavaScript fallback
+                try {
                     const clicked = await page.evaluate(() => {
-                        const buttons = Array.from(document.querySelectorAll('button, a'));
-                        
-                        for (const btn of buttons) {
-                            const text = btn.innerText.toLowerCase();
-                            if ((text.includes('@') && text.length < 50) || 
-                                text.includes('sign in')) {
-                                try {
-                                    btn.click();
-                                    return true;
-                                } catch (e) {
-                                    const event = new MouseEvent('click', { bubbles: true });
-                                    btn.dispatchEvent(event);
-                                    return true;
-                                }
-                            }
+                        const elements = Array.from(document.querySelectorAll('a, button'));
+                        const target = elements.find(el =>
+                            el.id === 'newSessionLink' ||
+                            (el.getAttribute('href') && el.getAttribute('href').includes('newSession'))
+                        );
+                        if (target) {
+                            target.click();
+                            return true;
                         }
-                        
-                        // Fallback: click any primary button
-                        for (const btn of buttons) {
-                            if (btn.classList.contains('btn-primary') || 
-                                btn.getAttribute('type') === 'submit') {
-                                try {
-                                    btn.click();
-                                    return true;
-                                } catch (e) {
-                                    const event = new MouseEvent('click', { bubbles: true });
-                                    btn.dispatchEvent(event);
-                                    return true;
-                                }
-                            }
-                        }
-                        
                         return false;
                     });
-
+                    
                     if (clicked) {
-                        logger.success('Selected account from selection page.');
+                        logger.success('Successfully clicked #newSessionLink via JavaScript fallback.');
+                        await page.waitForURL(url => url.includes('/mail/'), { timeout: 20000 });
                     } else {
-                        logger.warn('Could not find account button to click.');
+                        logger.warn('Could not find #newSessionLink even via JS scan.');
                     }
-                } else {
-                    logger.warn('Neither confirmation nor selection page detected, waiting for redirect...');
+                } catch (jsError) {
+                    logger.error(`JavaScript click also failed: ${jsError.message}`);
                 }
-            }
-
-            // Wait 15 seconds for the mail interface to load
-            logger.info('Waiting 15 seconds for Outlook mail interface...');
-            await page.waitForTimeout(15000);
-
-            // Verify we're at a mail URL
-            const newUrl = page.url();
-            if (newUrl.includes('/mail/')) {
-                logger.success(`Reached mail interface: ${newUrl}`);
-            } else {
-                logger.warn(`Unexpected URL after confirmation: ${newUrl}`);
-            }
-        } catch (e) {
-            logger.error(`Failed to handle Microsoft login confirmation in scrapeEmails: ${e.message}`);
-            
-            // Try JavaScript fallback
-            try {
-                const clicked = await page.evaluate(() => {
-                    const elements = Array.from(document.querySelectorAll('a, button'));
-                    const target = elements.find(el =>
-                        el.id === 'newSessionLink' ||
-                        (el.getAttribute('href') && el.getAttribute('href').includes('newSession'))
-                    );
-                    if (target) {
-                        target.click();
-                        return true;
-                    }
-                    return false;
-                });
                 
-                if (clicked) {
-                    logger.success('Successfully clicked #newSessionLink via JavaScript fallback.');
-                    await page.waitForTimeout(15000);
-                } else {
-                    logger.warn('Could not find #newSessionLink even via JS scan.');
-                }
-            } catch (jsError) {
-                logger.error(`JavaScript click also failed: ${jsError.message}`);
+                throw e;
             }
-            
-            throw e;
         }
     }
 
-    // Wait for stable state before scraping
-    logger.info('Waiting 15 seconds for page to stabilize...');
-    await page.waitForTimeout(15000);
+    // Wait for at least one email row to render if not already present
+    const hasRows = await page.evaluate(() => document.querySelector('[data-convid]') !== null);
+    if (!hasRows) {
+        logger.info('Waiting for email list to render...');
+        try {
+            await page.waitForSelector('[data-convid]', { state: 'visible', timeout: 15000 });
+        } catch (e) {
+            logger.warn(`Timeout waiting for email list rows: ${e.message}`);
+        }
+    } else {
+        logger.debug('Email list rows already present. Skipping stabilization wait.');
+    }
     
     logger.debug(`Current URL after stabilization: ${page.url()}`);
 
@@ -547,7 +561,8 @@ async function scrapeEmails(page) {
 
 /**
  * Scroll down the email list to load more emails (infinite scroll)
- * Outlook Web uses keyboard navigation for scrolling virtualized lists
+ * Outlook Web uses a virtualized list. Scroll using the container's scrollbar if possible
+ * to prevent changing the active selection and marking unread emails as read.
  * @param {import('playwright').Page} page
  * @param {number} maxScrolls - Maximum number of scroll attempts
  * @param {number} scrollDelay - Delay between scrolls in ms
@@ -564,10 +579,33 @@ async function scrollToLoadMoreEmails(page, maxScrolls = 10, scrollDelay = 2000)
 
         logger.debug(`Scroll attempt ${i + 1}/${maxScrolls}, current email count: ${emailCountBefore}`);
 
-        // Use keyboard navigation to scroll the virtualized list
-        // This is required for Outlook Web's infinite scroll to work
-        await page.keyboard.press('PageDown');
-        logger.debug('Sent PageDown key');
+        // Try to scroll the mail list container directly
+        const scrolled = await page.evaluate(() => {
+            const row = document.querySelector('[data-convid]');
+            if (!row) return false;
+
+            let parent = row.parentElement;
+            while (parent) {
+                const style = window.getComputedStyle(parent);
+                const isScrollable = parent.scrollHeight > parent.clientHeight &&
+                                     (style.overflowY === 'auto' || style.overflowY === 'scroll');
+                if (isScrollable) {
+                    // Scroll down by the height of the container
+                    parent.scrollTop += parent.clientHeight;
+                    return true;
+                }
+                parent = parent.parentElement;
+            }
+            return false;
+        });
+
+        if (scrolled) {
+            logger.debug('Scrolled email list container via scrollTop');
+        } else {
+            // Fallback to keyboard navigation if we couldn't find a scrollable container
+            await page.keyboard.press('PageDown');
+            logger.debug('Sent PageDown key (fallback)');
+        }
 
         // Wait for new content to load
         logger.debug(`Waiting ${scrollDelay}ms for emails to load...`);
