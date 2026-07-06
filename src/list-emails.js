@@ -520,6 +520,9 @@ async function scrapeEmails(page, tabOverride = 'Focus') {
 
         for (const row of msgRows) {
             try {
+                // Extract emailId
+                const emailId = row.getAttribute('id') || '';
+
                 // Extract conversationId
                 const conversationId = row.getAttribute('data-convid') || '';
 
@@ -598,6 +601,7 @@ async function scrapeEmails(page, tabOverride = 'Focus') {
                 // Only include if we have at least a subject or sender
                 if (subject || sender) {
                     results.push({
+                        emailId,
                         conversationId,
                         receivedDate: date,
                         subject,
@@ -941,7 +945,7 @@ async function listEmails(options = {}) {
                 let newEmails = await scrapeEmails(page, currentTabCategory);
 
                 for (const email of newEmails) {
-                    const key = email.conversationId || `${email.subject || ''}-${email.sender || ''}-${email.receivedDate || ''}`;
+                    const key = email.emailId || email.conversationId || `${email.subject || ''}-${email.sender || ''}-${email.receivedDate || ''}`;
                     if (!uniqueEmails.has(key)) {
                         uniqueEmails.set(key, email);
                     }
@@ -962,7 +966,7 @@ async function listEmails(options = {}) {
 
                     let newlyAdded = 0;
                     for (const email of newerEmails) {
-                        const key = email.conversationId || `${email.subject || ''}-${email.sender || ''}-${email.receivedDate || ''}`;
+                        const key = email.emailId || email.conversationId || `${email.subject || ''}-${email.sender || ''}-${email.receivedDate || ''}`;
                         if (!uniqueEmails.has(key)) {
                             uniqueEmails.set(key, email);
                             newlyAdded++;
